@@ -1,0 +1,667 @@
+---
+title: 'Flight Delays: Patterns, Causes, and Avoidability'
+author: "Fahtai Tanawongsuwan"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+  pdf_document:
+    toc: true
+---
+
+# Flight Delays Analysis Project
+
+Author: Fahtai TANAWONGSUWAN (3036538194)
+
+Modified from the author's COMP2501 Intro to Data Science project - The University of Hong Kong
+
+# Introduction
+
+Flight delays are one of the most common frustrations in air travel. While many delays may appear random from a passenger’s perspective, large-scale flight data may reveal patterns behind them.
+
+This project investigates whether flight delays are purely unlucky, or whether there are measurable factors that consistently correlate with delays.
+
+The project focuses on three main questions:
+
+1.  Are there factors that consistently correlate with delays?
+2.  Can passengers choose flights strategically to reduce the probability of delays?
+3.  Was the author's personal flight delay simply unlucky?
+
+# Tools and Libraries
+
+This project used R and R libraries including:
+
+```{r setup, message=FALSE, warning=FALSE}
+library(dplyr)
+library(ggplot2)
+library(tidyverse)
+library(readr)
+library(lubridate)
+library(ggrepel)
+library(jsonlite)
+```
+
+# Data Sources
+
+## United States Flight Data from 2024-2025
+
+The primary dataset used in this project comes from the US Bureau of Transportation Statistics.
+
+Data source: <https://www.transtats.bts.gov/>
+
+The dataset contains information about individual flights, including:
+
+- Origin and destination airports
+- Airline carrier
+- Scheduled departure and arrival times
+- Actual departure and arrival times
+- Delay information
+- Flight distance
+
+Dataset Advantages:
+
+- Large number of observations
+- Data is mostly clean, tidy and complete
+- Data includes many features
+
+## Hong Kong Flight Data
+
+Additional flight data for Hong Kong International Airport (HKG) was collected from the Hong Kong Government open data API for flights departing HKG during March and April 2026.
+
+Data source: <https://data.gov.hk/en/>
+
+The HKG dataset was limited by limited data features and more importantly, limited historical data, with the API only able to access data from the 90 previous days. So it was used for a smaller and more specific case study investigating a personally experienced delayed flight.
+
+# Loading the US Dataset
+
+```{r}
+years <- c("24","25")
+months <- c("01","02","03","04","05","06","07","08","09","10","11","12")
+dot_csv <- ".csv"
+
+month_year <- expand.grid(m=months,y=years)
+file_names <- paste0(month_year$y,month_year$m,dot_csv)
+
+df <- data.frame()
+for(i in file_names) {
+  df <- bind_rows(df,read_csv(i, show_col_types = FALSE))
+}
+
+new_colnames <- c("year","month","date","day_of_week","carrier","uniq_carrier","flight_number","orig","orig_state","dest","dest_state","sch_dept","real_dept","sch_arrv","real_arrv","cancelled","cancel_code","sch_flight_time","real_flight_time","flight_distance","delay_carrier","delay_weather","delay_nas","delay_security","delay_late_aircraft")
+colnames(df) <- new_colnames
+flights <- df
+
+print("Dataset size and head")
+dim(flights)
+head(flights,6)
+```
+
+# Data Cleaning and Feature Engineering
+
+The raw dataset obtained from the BTS query system was already relatively clean. However, several preprocessing steps were still required before analysis.
+
+The following cleaning procedures were performed:
+
+1.  Remove cancelled flights
+2.  Replace missing values with 0
+3.  Convert time columns into proper time format
+4.  Create new variables for delays
+
+In this project, a flight is defined as **delayed** if it **departs more than 30 minutes behind** schedule.
+
+```{r warning=FALSE}
+# Remove cancelled flights
+flights <- flights |>
+  filter(cancelled == 0) |>
+  select(-cancelled,-cancel_code,-uniq_carrier)
+
+# Replace missing values
+flights[is.na(flights)] <- 0
+
+# Convert HHMM values into time format
+hhmm_to_time <- function(x) {
+  paste0(substr(x,1,2)," ",substr(x,3,4)) |> hm()
+}
+for(i in 11:14) {
+  flights[[i]] <- hhmm_to_time(flights[[i]])
+}
+
+# Create delay variables
+flights <- flights |>
+  mutate(
+    dept_delay_min = as.numeric(real_dept - sch_dept, units="mins"),
+    arrv_delay_min = as.numeric(real_arrv - sch_arrv, units="mins"),
+    dept_delay_min = ifelse(dept_delay_min < -720,
+                            dept_delay_min + 1440,
+                            dept_delay_min),
+    arrv_delay_min = ifelse(arrv_delay_min < -720,
+                            arrv_delay_min + 1440,
+                            arrv_delay_min),
+    dept_delay = ifelse(dept_delay_min > 30, TRUE, FALSE),
+    delay_on_air = real_flight_time - sch_flight_time
+  )
+
+head(flights,10)
+```
+
+# Exploratory Data Analysis
+
+The exploratory analysis focuses on identifying whether certain variables are associated with flight delays.
+
+The variables were grouped into three categories:
+
+| Category            | Variables                |
+|---------------------|--------------------------|
+| Uncontrollable      | Airport, Flight Distance |
+| Semi-uncontrollable | Date                     |
+| Mostly Controllable | Airline/Carrier          |
+
+## Airport Analysis
+
+### Do Some Airports Experience More Delays?
+
+One possible explanation for delays is airport congestion. Large airports process substantially more traffic, which may increase the likelihood of delays.
+
+To investigate this, flights were grouped by origin airport.
+
+```{r}
+total_flights = summarize(flights,n()) %>% .[1,1]
+
+flights_by_origin <- flights |>
+                      group_by(orig) |> 
+                     summarize(delay_chance = round(mean(dept_delay)*100,digits=3),
+                      proportion = n()/total_flights*100)
+flights_by_origin <- left_join(flights_by_origin,
+                               flights |> filter(dept_delay==TRUE) |>
+                              group_by(orig) |>
+                              summarize(average_delay=round(mean(dept_delay_min))),
+                              join_by(orig))
+flights_by_origin[is.na(flights_by_origin)] <- 0
+```
+
+### Delay Chance by Airport
+
+```{r fig.height=10}
+
+plot_chance_by_origin <- ggplot(flights_by_origin,aes(x=reorder(orig,-delay_chance),y=delay_chance,alpha=proportion)) +
+  geom_col(fill="red") + coord_flip() +
+  ggtitle("Chance of Delay by Origin") + xlab("Origin Airport") + ylab("Delay Chance (%)")
+plot_chance_by_origin
+
+plot_chance_by_origin_top <- ggplot(flights_by_origin |> arrange(desc(delay_chance)) |> head(30),aes(x=reorder(orig,-delay_chance),y=delay_chance,alpha=proportion)) +
+  geom_col(fill="red") + coord_flip() +
+  ggtitle("Chance of Delay by Origin (Worst 30 Airports)") + xlab("Origin Airport") + ylab("Delay Chance (%)")
+plot_chance_by_origin_top
+```
+
+The analysis shows that some airports consistently experience relatively higher delay rates than others.
+
+The airports with the highest delay probability include:
+
+- VRB — Vero Beach
+- DFW — Dallas Fort Worth
+- MIA — Miami
+- FLL — Fort Lauderdale-Hollywood
+- CLT — Charlotte Douglas
+
+This suggests that airport choice may influence the probability of delays.
+
+### Airport Size vs Delay Rate
+
+```{r}
+plot_chance_vs_proportion <- flights_by_origin |>
+  ggplot(aes(y=delay_chance,x=proportion)) + geom_point() + geom_smooth(method="lm",se=FALSE) + ggtitle("Delay Chance by Airport size") +
+  xlab("Porportion of flights(%)") + ylab("Delay chance (%)")
+plot_chance_vs_proportion
+cor(flights_by_origin$proportion,flights_by_origin$delay_chance)
+
+plot_chance_vs_proportion_zoom <- flights_by_origin |> filter(proportion>0.1) |>
+  ggplot(aes(y=delay_chance,x=proportion)) + geom_point() + geom_smooth(method="lm",se=FALSE) + ggtitle("Delay Chance by Airport size") +
+  xlab("Proportion of flights(%)") + ylab("Delay chance (%)")
+plot_chance_vs_proportion_zoom
+flights_by_origin_zoom <- flights_by_origin |> filter(proportion>0.1)
+cor(flights_by_origin_zoom$proportion,flights_by_origin_zoom$delay_chance)
+```
+
+The relationship between airport size and delay probability is positive but relatively weak.
+
+- Using all airports, the correlation is weak.
+- Among sufficiently large airports, the relationship remains weak-to-moderate.
+
+suggests that larger and busier airports may be slightly more prone to delays due to congestion effects.
+
+## Flight Distance Analysis
+
+### Do Longer Flights Experience More Delays?
+
+A common assumption is that longer flights may experience greater delays.
+
+```{r}
+flights_by_distance <- flights |>
+  mutate(distance_group = cut(flight_distance, breaks=20)) |>
+  group_by(distance_group) |>
+  summarize(
+    delay_chance = mean(dept_delay)*100,
+    avg_delay = mean(dept_delay_min)
+  )
+
+head(flights_by_distance)
+```
+
+The analysis found little evidence that longer flights are substantially more likely to be delayed.
+
+Flight distance appears to have minimal impact on delay probability. Long-distance flights may experience slightly longer delays on average, but the difference is negligible.
+
+## Seasonal and Date Analysis
+
+### Do Holidays and Peak Seasons Increase Delays?
+
+One possible factor affecting flight delays is travel demand. During holidays and peak travel seasons, airports and airlines must handle substantially larger passenger volumes, which may increase congestion throughout the aviation network.
+
+To investigate this relationship, flights were grouped by calendar date and two metrics were calculated:
+
+- **Delay chance**: the proportion of flights departing more than 30 minutes late.
+
+- **Average delay duration**: the mean departure delay in minutes.
+
+```{r}
+flights_by_date <- flights |> group_by(month,date) |> summarize(delay_chance = mean(dept_delay), delay_duration = mean(dept_delay_min), .groups = "drop")
+
+plot_chance_by_date <- ggplot(flights_by_date, aes(x = date, y = factor(month), fill = delay_chance)) +
+  geom_tile() +
+  scale_fill_gradient(low = "white", high = "red") +
+  labs(
+    title = "Daily Flight Delay Rate Heatmap",
+    x = "Day of Month",
+    y = "Month",
+    fill = "Delay %"
+  ) + theme_minimal()
+plot_chance_by_date
+
+plot_duration_by_date <- ggplot(flights_by_date, aes(x = date, y = factor(month), fill = delay_duration)) +
+  geom_tile() +
+  scale_fill_gradient(low = "white", high = "blue") +
+  labs(
+    title = "Daily Flight Delay Length Heatmap",
+    x = "Day of Month",
+    y = "Month",
+    fill = "Delay Duration (mins)"
+  ) + theme_minimal()
+plot_duration_by_date
+```
+
+The heatmaps reveal several periods where delays become more frequent. Some of these periods align closely with major US travel seasons and holidays, suggesting that increased passenger demand may contribute to flight disruptions.
+
+Notable periods include:
+
+- **Late December** - Christmas and year-end holiday season
+- **Late November** - Thanksgiving travel period
+- **Mid-March** - spring travel season, around school holidays
+- **Early August** - near the end of the summer vacation season
+
+### Outliers: External Events
+
+While many delay patterns appear seasonal, several periods do not perfectly align on the heatmaps. Unlike holiday periods, these spikes are concentrated on individual days and are likely caused by specific one-time disruptions rather than increased travel demand or a regular occurence.
+
+Several notable examples were identified:
+
+- **9 January 2024** – a major winter storm affected large portions of the United States, disrupting airport operations and causing widespread delays.
+- **19 July 2024** – the global CrowdStrike outage disrupted airline and airport computer systems, resulting in significant operational delays across multiple carriers. This resulted in an outlier point with the most significant delay rates and times in the heatmap.
+- **5 August 2025** – Hurricane Debby impacted the southeastern United States, producing severe disruptions to flight schedules.
+
+After identifying and accounting for extreme outlier dates caused by one-off external disruption, a clearer seasonal pattern emerges. The remaining high-delay regions on the heatmaps are concentrated around major travel periods, including Thanksgiving, the Christmas and New Year holiday season, spring travel periods, and the end of summer vacation. While it does not establish a causal relationship, the consistent appearance of these periods suggests that increased travel demand during peak seasons is associated with an elevated flight delay.
+
+## Airline Analysis
+
+### Do Some Airlines Delay More Than Others?
+
+One variable that passengers can choose in air travel is the airline or carrier, so we want to investigate if different airlines have different patterns and if delays can become a factor when booking an airline. First, we group the data by airline and plot airline size and delay rate.
+
+```{r}
+flights_by_airline <- flights |> group_by(carrier) |>
+  summarize(delay_chance = round( mean(dept_delay)*100, digits=3),
+            proportion = round(n()/total_flights*100, digits=2)) 
+
+flights_by_airline <- left_join(flights_by_airline,
+          flights |> filter(dept_delay==TRUE) |>
+            select(carrier,dept_delay_min,delay_carrier,delay_late_aircraft) |>
+            group_by(carrier) |> 
+            summarize(
+              average_delay = mean(dept_delay_min),
+              delay_carrier = mean(delay_carrier),
+              delay_late_aircraft = mean(delay_late_aircraft)
+            ), by = "carrier")
+
+flights_by_airline |> arrange(desc(delay_chance)) |> head(10)
+
+plot_chance_by_airline <- flights_by_airline |> ggplot(aes(x=proportion,y=delay_chance, col=average_delay,label=carrier)) +
+  geom_point(size=5) +
+  scale_color_gradient(low = "skyblue", high = "blue4",) +
+  geom_text_repel() +
+  ggtitle("Airline's proportion and Delay Chance and Average delay") +
+  xlab("Proportion of flights (%)") + ylab("Delay Chance (%)")
+plot_chance_by_airline
+```
+
+The analysis found that some airlines delay more frequently and longer than others, but there is no correlation between airline size, measured by the proportion of flights operated by that airline, and delay rate or length. Therefore, choosing a popular or big airline does not automatically it is better or worse in terms of delays, but we have to look at the specific airline statistics.
+
+Worst performing airlines include:
+
+- (F9) Frontier Airlines - 19.15% delayed; 99.69 minutes on average
+- (B6) JetBlue - 17.78% delayed; 97.44 minutes on average
+- (AA) American Airlines - 17.26%; 102.25 minutes on average
+
+The best performing airline by a margin was (HA) Hawaiian Air 6.86% delayed; 83.13 minutes on average.
+
+The observed differences suggest airline selection may affect delay probability.
+
+# Can Passengers Reduce Delay Risk?
+
+The historical data analysis suggests that passengers may be able to reduce delay probability by choosing:
+
+- Less delay-prone airports
+- Less congested travel dates
+- Airlines with stronger delay performance
+- Specific flights with historically lower delay rates (shown in later case study)
+
+This suggests that historical flight statistics may help passengers make better travel decisions.
+
+# Case Study: Personal flight delay (CX362, HKG)
+
+## Motivation
+
+The second part of the project investigates a personal delayed flight experience. A quick story, I thought about this project topic when I was sitting at Hong Kong International Airport on the evening of April 2, 2026 waiting for my CX362 flight, then a notification came that the flight has been delayed. So I wanted to use data science to not only investigate all flights, but also that specific flight and if it was avoidable.
+
+The key question was:
+
+> Was that delayed flight simply unlucky?
+>
+> Was it avoidable?
+
+## Collecting Hong Kong Flight Data
+
+Additional data from Hong Kong International Airport (HKG) was collected using the Hong Kong Government API. However, the data was limited because the API only provides 90 days of historical data and contains fewer variables than the US dataset.
+
+Flight information for March and April 2026 (around the incident) was collected using API requests.
+
+This is the original code to pull API
+
+BUT API only available for 90 days after March 1, 2026
+
+Alternative datasource below (exported original to CSV previously)
+
+```{r eval=FALSE, include=TRUE}
+
+# This code chunk does not work
+# This is the original code to pull API
+# BUT API only available for 90 days after March 1, 2026
+# Alternative datasource below (exported original previously)
+
+
+dates_MarApr2026 <- seq(
+  from = as.Date("2026-03-01"),
+  to = as.Date("2026-04-30"),
+  by = "day"
+)
+
+get_flights <- function(d){
+
+  url <- paste0(
+    "https://www.hongkongairport.com/flightinfo-rest/rest/flights/past?date=",
+    d,
+    "&lang=en&cargo=false&arrival=false"
+  )
+
+  tryCatch(
+    raw <- fromJSON(url)$list[[1]] |> as_tibble(),
+    error = function(e) NULL
+  )
+  
+  raw <- raw |> select(time,flight,status,destination) |>
+      filter(status!="Cancelled") |>
+      unnest(destination) |>
+      mutate(sch_dept = hm(time),
+            real_dept = hm(substr(status,5,9)),
+            delay_min = as.numeric(real_dept - sch_dept, unit="mins"),
+            delay_min = ifelse(delay_min < -720, delay_min + 1440, delay_min),
+            delayed = ifelse(delay_min>30,TRUE,FALSE),
+            day = substr(d,9,10),
+            month = substr(d,6,7),
+            date = paste0(month,day))
+  return(raw)
+}
+
+flights_hk <- map(dates_MarApr2026, get_flights)
+flights_hk <- bind_rows(flights_hk)
+flights_hk_unnested <- flights_hk |> unnest(flight)
+
+head(flights_hk,10)
+head(flights_hk_unnested,10)
+```
+
+```{r}
+#Import data if API past 90 days
+#PS Original CSV is lost, data only available from Mar3 - Apr30 (2 days missing)
+
+flights_hk_unnested <- readRDS("flights_hk_unnested3.rds")
+flights_hk <- readRDS("flights_hk3.rds")
+
+
+head(flights_hk,10)
+head(flights_hk_unnested,10)
+```
+
+## HKG Airport Performance
+
+To evaluate HKG's overall performance, we take HKG's delay percentage and compare with the airports in the US dataset and the mean of the US dataset.
+
+```{r}
+
+hkg_delay_percentage <- count(flights_hk,delayed)[2,2] / count(flights_hk) *100
+us_delay_percentage <- count(flights,dept_delay)[2,2] / count(flights) *100
+
+hkg_df <- data.frame(orig="HKG", delay_chance=hkg_delay_percentage[1,1])
+us_avg_df <- data.frame(orig="US average", delay_chance=us_delay_percentage[1,1])
+flights_by_origin_andhk <- bind_rows(flights_by_origin,hkg_df)
+flights_by_origin_andhk <- bind_rows(flights_by_origin_andhk,us_avg_df)
+
+plot_chance_by_origin_HKG <- ggplot(
+  flights_by_origin_andhk,
+  aes(
+    x = reorder(orig, -delay_chance),
+    y = delay_chance,
+    alpha = orig %in% c("HKG", "US average")
+  )
+) +
+  geom_col(fill = "red") +
+  coord_flip() +
+  scale_alpha_manual(values = c("TRUE" = 1, "FALSE" = 0.2)) +
+  ggtitle("Chance of Delay by Origin") +
+  xlab("Origin Airport") +
+  ylab("Delay Chance (%)") +
+  geom_text(
+    data = subset(flights_by_origin_andhk, orig %in% c("HKG", "US average") ),
+    aes(label = paste0(orig, " (", round(delay_chance, 2), "%)")),
+    hjust = -0.1,
+    size = 5,
+    fontface = "bold"
+  ) +
+  guides(alpha = "none")
+plot_chance_by_origin_HKG
+```
+
+From the chart, HKG's delay chance is around 11.73%, better than the US average. It will be used later for comparision with more specific data.
+
+## Was the specific Flight Delay Unlucky?
+
+So we take a look at flights statistics on that April 2, 2026, from that airline Cathay Pacific, and heading to the same destination PVG, and compare them to HKG's average.
+
+```{r}
+#Delay Chance on that specific date (April 2,2026)
+flights_hk |> filter(day=="02" & month=="04") |> summarize(Apr2_delay_chance=mean(delayed)) %>% pull()
+
+#Delay Count of that specific airline (CPA Cathay Pacific)
+Cathay <- flights_hk_unnested |> filter(airline=="CPA")
+plot_Cathay <- Cathay |> ggplot(aes(delay_min)) +
+  geom_histogram(binwidth = 5, fill="#69b3a2") +
+  geom_vline(xintercept = 30,col="red") +
+  geom_vline(xintercept = 73, col="cyan") +
+  coord_cartesian(xlim = c(-50, 300)) +
+  xlab("Delay (min)") + ylab("count") + ggtitle("Cathay Pacific Delays")
+plot_Cathay
+
+#Delay Count of flights from HKG to PVG
+PVG <- flights_hk_unnested |> filter(destination=="PVG")
+plot_PVG <- PVG |> ggplot(aes(delay_min,fill=airline)) +
+  geom_histogram(binwidth = 5,alpha=0.5) +
+  geom_vline(xintercept = 30,col="red") +
+  geom_vline(xintercept = 73, col="cyan") +
+  coord_cartesian(xlim = c(-50, 200)) +
+  xlab("Delay (min)") + ylab("count") + ggtitle("Flights to PVG")
+plot_PVG
+```
+
+For the date April 2, 2026, the delay rate was almost 17% compared to the usual 11.73%. Also, from both plots, CPA flights and flights to PVG, show that my flight (cyan line) was among the worst performing flights with only 2.7% and 2.3% of flights performing worse respectively.
+
+Also, to test that it was indeed unlucky, we find the p-value and assume the null hypothesis is
+
+- Flights on April 2, 2026 delayed with same probability as HKG's average (+6% was just unlucky)
+- Flights by CPA delayed with same probability as HKG's average (the airline is not the problem)
+
+```{r}
+#Calculate p-values to test if date and airlines are normal
+HKG_delayed <- flights_hk |> group_by(delayed) |> count()
+
+Apr2_delayed <- flights_hk_unnested |> filter(day=="02" & month=="04") |> group_by(delayed) |> count()
+CPA_delayed <- flights_hk_unnested |> filter(airline=="CPA") |> group_by(delayed) |> count()
+
+HKG_vs_Apr2 <- matrix(
+  c(HKG_delayed[[2]][2], HKG_delayed[[2]][1],
+    Apr2_delayed[[2]][2], Apr2_delayed[[2]][1]),
+  nrow = 2,
+  byrow = TRUE
+)
+HKG_vs_Apr2
+chisq.test(HKG_vs_Apr2)
+
+HKG_vs_CPA <- matrix(
+  c(HKG_delayed[[2]][2], HKG_delayed[[2]][1],
+    CPA_delayed[[2]][2], CPA_delayed[[2]][1]),
+  nrow = 2,
+  byrow = TRUE
+)
+HKG_vs_CPA
+chisq.test(HKG_vs_CPA)
+```
+
+From the p-values we conclude that:
+
+1.  The April 2, 2026 hypothesis has a very low p-value, indicating the null-hypothesis is false, so flights on that specific date has a higher chance of delaying than average. Also, April 2, 2026 is the evening before a five day holiday in Hong Kong (Qingming festival and Easter break), thus a peak travel season, which follows our previous conclusion that peak travel seasons correlate with more delays. So it was not unlucky, rather it is expected because of the flight date.
+2.  Cathay Pacific has a 0.28 p-value, which indicates that it is statistically insignificant. Therefore this particular CPA flight was probably unlucky, not the airline being worse performing.
+
+## Was that particular delay avoidable?
+
+Previously, factors that passengers can choose are airlines and specific flights, so we take a look at both.
+
+```{r warning=FALSE}
+
+plot_HKG_by_airline <- flights_hk_unnested |>
+  group_by(airline) |>
+  summarize(delay_min=mean(delay_min),delay_chance=mean(delayed)) |>
+  ggplot(aes(x=delay_chance,y=delay_min)) +
+  geom_point(aes(color = airline == "CPA",size = airline == "CPA"),alpha=0.4) +
+  geom_text_repel(data =\(x) subset(x, airline == "CPA"),aes(label = airline)) +
+  scale_color_manual(values = c("TRUE" = "#69b3a2", "FALSE" = "black")) +
+  coord_cartesian(xlim = c(0, 0.4), ylim = c(0, 60)) +
+  labs(x="Delay Chance",y="Average Delay (min)") +
+  scale_size_manual(values = c("TRUE" = 4, "FALSE" = 1)) +
+  guides(color = "none",size="none",color="none") +
+  ggtitle("Airlines Delay length and chances")
+plot_HKG_by_airline
+```
+
+From the plot of all airlines' delay chance and delay length, we can see that there are airlines that are statically better that Cathay Pacific in terms of delay. So the delay can be slightly avoidable if I choose another better performing airline.
+
+However, if we take a look at CX362 in particular:
+
+```{r}
+CX362 <- flights_hk_unnested |> filter(no=="CX 362")
+plot_CX362 <- CX362 |> ggplot(aes(x=reorder(date, as.numeric(date)),y=delay_min, alpha = ifelse(date=="0402",1,0.9))) +
+  geom_col(fill="#69b3a2") + ggtitle("CX 362") + coord_flip() +
+  xlab("date") + ylab("delay (min)") +
+  geom_text(
+    data = subset(CX362, date == "0402"),
+    aes(label = paste("April 2: ",delay_min,"minute delay")),
+    hjust = -0.5,
+    fontface = "bold"
+  ) +
+  guides(alpha="none",size="none",color="none")
+plot_CX362 
+```
+
+We see that CX362 on April 2, 2026 was not nearly the worst performer, and there are significantly more delays than the normal 12% for CPA, so the problem might be that particular flight.
+
+To confirm, we find the p-value with the null hypothesis being that CX362 has a same delay chance as HKG's average.
+
+```{r}
+CX362_delayed <- flights_hk_unnested |> filter(no=="CX 362") |> group_by(delayed) |> count()
+HKG_vs_CX362 <- matrix(
+  c(HKG_delayed[[2]][2], HKG_delayed[[2]][1],
+    CX362_delayed[[2]][2], CX362_delayed[[2]][1]),
+  nrow = 2,
+  byrow = TRUE
+)
+
+HKG_vs_CX362
+chisq.test(HKG_vs_CX362)
+```
+
+From the extremely small p-value, we conclude that the delay rate of CX362 differs significantly from the overall HKG average. So a part of the problem is from flight CX362's external factors, and the delay was more avoidable if I had chosen another flight!
+
+# Key Takeaways
+
+The project produced several major findings:
+
+1.  Some airports consistently experience more delays than others.
+2.  Peak travel seasons tend to increase delay probability.
+3.  Airlines differ noticeably in delay frequency and severity.
+4.  Flight distance has relatively little effect on delay probability.
+5.  Choosing flights from historical data can partially help passengers reduce delay risk.
+
+Overall, flight delays are not purely random. While luck still plays a role, historical patterns reveal meaningful trends that may help explain, predict and avoid delays.
+
+# Limitations
+
+Several limitations should be acknowledged:
+
+- Weather data was not directly integrated into the analysis.
+- The Hong Kong dataset was relatively small.
+- Delay causes may overlap across operational categories.
+- Correlation does not imply causation.
+
+Future work could incorporate:
+
+- Machine learning prediction models
+- Weather APIs
+- Time-of-day analysis
+- Route network analysis
+- Real-time delay prediction
+
+# Conclusion
+
+This project explored whether flight delays are random or whether identifiable patterns exist.
+
+Using large-scale flight datasets from the United States, the analysis found that airports, airlines, seasonal demand, and major incidents all correlate with delays.
+
+Although passengers cannot fully eliminate delay risk, historical flight data can improve understanding of when and where delays are more likely to occur, as shown from the Hong Kong flight data.
+
+In the case study investigated in this project, the delayed flight appeared to be relatively unlucky — but not entirely unavoidable.
+
+# References
+
+## Data Sources
+
+- Hong Kong Government Open Data API <https://data.gov.hk/en/>
+
+- US Bureau of Transportation Statistics <https://www.bts.gov/>
