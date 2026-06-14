@@ -97,11 +97,11 @@ Flight delays affect millions of passengers every year and have significant econ
 ```
 .
 ├── data/                  # Raw and processed datasets
+├── figures/               # Figures/Charts made by the script
 ├── report/                # R Markdown report and output files
 ├── scripts/               # Data cleaning and analysis scripts
 └── README.md
 ```
-aaaaaaaaaaaaaaaaaaaa
 ## 📊 Example Visualizations
 
 ### Delay Chance by Date Heatmap
@@ -109,7 +109,7 @@ aaaaaaaaaaaaaaaaaaaa
 <p align="center">
   <img src="figures/04_Date_vs_Chance_Heatmap.png" width="700">
   <br>
-  <em>Figure 1. Delay Chance by Date.</em>
+  <em>Figure 1. Delay Chance by Date</em>
 </p>
 
 ### Flights to PVG Delay Statistics
@@ -117,15 +117,15 @@ aaaaaaaaaaaaaaaaaaaa
 <p align="center">
   <img src="figures/09_PVG_Delay.png" width="700">
   <br>
-  <em>Figure 2. The Delay Statistics of Flights to PVG.</em>
+  <em>Figure 2. The Delay Statistics of Flights to PVG</em>
 </p>
 
-### How Cathay Pacific Compares with other airlines
+### How Cathay Pacific compares with other airlines
 
 <p align="center">
   <img src="figures/10_HKG_Airlines_Scatterplot.png" width="700">
   <br>
-  <em>Figure 3. Airline Performance Scatterplot.</em>
+  <em>Figure 3. Airline Performance Scatterplot</em>
 </p>
 
 ---
